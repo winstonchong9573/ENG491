@@ -21,8 +21,11 @@ or other perturbations.
 GCRS - Geocentric Celestial Reference System
 ITRS - International Terrestrial Reference System
 
-Velocity and Sun/Planet vectors are exported in GCRS axes.
-Verify that these match Thermal Desktop's expected coordinate frame.
+FMH velocity and Sun/Planet vectors are exported in spacecraft body axes.
+Body +X follows atmosphere-relative velocity (nose forward). Body +Z is
+the Earth-center direction projected perpendicular to +X; +Y completes
+a right-handed frame. This assumes continuous ram-pointing attitude.
+Diagnostic orbital position and velocity remain in GCRS axes.
 
 F10.7 - Solar radio flux at 10.7 cm wavelength
 Ap - Daily geomagnetic activity index
@@ -341,6 +344,30 @@ def sun_planet_vectors(position_km, date_utc):
     return sun_vector, planet_vector
 
 
+def body_frame_rotation(position_km, velocity_km_s):
+    """Return the GCRS-to-body rotation for a ram-pointing spacecraft.
+
+    Rows are body axes expressed in GCRS. +Z follows projected nadir,
+    fixing roll about the atmosphere-relative velocity (+X).
+    """
+    omega = np.array([0.0, 0.0, 2 * np.pi / SIDEREAL_PERIOD_S])
+    velocity_relative = velocity_km_s - np.cross(omega, position_km)
+    speed = np.linalg.norm(velocity_relative)
+    radius = np.linalg.norm(position_km)
+    if speed <= 0 or radius <= 0:
+        raise ValueError("Body attitude requires nonzero position and relative velocity.")
+
+    x_axis = velocity_relative / speed
+    nadir = -position_km / radius
+    z_axis = nadir - np.dot(nadir, x_axis) * x_axis
+    z_norm = np.linalg.norm(z_axis)
+    if z_norm < 1e-12:
+        raise ValueError("Body roll is undefined when relative velocity is radial.")
+    z_axis /= z_norm
+    y_axis = np.cross(z_axis, x_axis)
+    return np.vstack((x_axis, y_axis, z_axis))
+
+
 # ============================================================
 # 10. NRLMSISE-00 DENSITY
 # ============================================================
@@ -422,6 +449,12 @@ def main():
             velocity_km_s
         )
 
+        # Express all FMH directions in the stationary CAD/body frame.
+        # With the default velocity convention, direction is [1, 0, 0]
+        # to floating-point precision; incoming gas motion is opposite.
+        gcrs_to_body = body_frame_rotation(position_km, velocity_km_s)
+        direction = gcrs_to_body @ direction
+
         vx, vy, vz = direction
 
         # Free molecular heating flux
@@ -432,6 +465,8 @@ def main():
             position_km,
             date_utc
         )
+        sun = gcrs_to_body @ sun
+        planet = gcrs_to_body @ planet
 
         # Diagnostic output
         density_rows.append([
